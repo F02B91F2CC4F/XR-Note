@@ -1,0 +1,201 @@
+version: "3"
+networks:
+  pro-network:
+    driver: bridge
+services:
+  # nginx前端代理服务 =====================================================
+  nginx:
+    image: nginx:1.23.3
+    networks:
+      - pro-network
+    restart: always
+    container_name: nginx
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - "./nginx/html/:/usr/share/nginx/html/"
+      - "./nginx/logs/:/var/log/nginx/"
+      - "./nginx/conf:/etc/nginx"
+      - "./nginx/nginx.conf:/etc/nginx/nginx.conf"
+
+  # 流量防卫兵 =====================================================
+  sentinel-dashboard:
+    image: bladex/sentinel-dashboard:1.8.0
+    container_name: sentinel-dashboard
+    restart: always
+    environment:
+      JAVA_OPTS: "-Dserver.port=8858 -Dcsp.sentinel.dashboard.server=localhost:8858 -Dproject.name=sentinel-dashboard"
+    ports: #避免出现端口映射错误，建议采用字符串格式 8080端口为Dockerfile中EXPOSE端口
+      - "8858:8858"
+    volumes:
+      - "./sentinel/logs:/root/logs"
+
+  # 分布式事务 =====================================================
+  seata-server:
+    image: seataio/seata-server:1.4.2
+    restart: always
+    networks:
+      - pro-network
+    hostname: seata-server
+    ports:
+      - "8091:8091"
+    environment:
+      # 指定seata服务启动端口
+      - SEATA_PORT=8091
+      # 注册到nacos上的ip。客户端将通过该ip访问seata服务。
+      # 注意公网ip和内网ip的差异。
+      - SEATA_IP=nacos
+      - SEATA_CONFIG_NAME=file:/root/seata-config/registry
+    volumes:
+      - "/usr/share/zoneinfo/Asia/Shanghai:/etc/localtime" #设置系统时区
+      - "/usr/share/zoneinfo/Asia/Shanghai:/etc/timezone"  #设置时区
+    # 因为registry.conf中是nacos配置中心，只需要把registry.conf放到./seata-server/config文件夹中
+      - "./seata-server/config:/root/seata-config"
+
+  # mysql数据库 =====================================================
+  mysql-8:
+    image: mysql:8.0.31
+    restart: always
+    networks:
+      - pro-network
+    ports:
+      - "3306:3306"
+    volumes:
+      - "./mysql/data/:/var/lib/mysql"
+      - "./mysql/log/:/var/log/mysql"
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+
+  # redis =====================================================
+  redis:
+    image: redis:alpine3.17
+    restart: always
+    networks:
+      - pro-network
+    ports:
+      - "6379:6379"
+
+  # nacos注册与配置中心 =====================================================
+  nacos:
+    image: nacos/nacos-server:v2.1.2
+    networks:
+      - pro-network
+    container_name: nacos
+    restart: always    
+    environment:
+      - MODE=standalone
+    volumes:
+      - ./nacos/logs:/home/nacos/logs
+      - ./nacos/init.d:/home/nacos/init.d
+    ports:
+      - "8848:8848"
+      - "9848:9848"
+      - "9849:9849"
+
+  # rocketMQ消息队列 =====================================================
+  rmq-namesrv:
+    image: apache/rocketmq:4.9.4
+    container_name: rmq-namesrv
+    restart: always
+    ports:
+      - 9876:9876
+    environment:
+    #内存分配
+      JAVA_OPT_EXT: "-server -Xms1g -Xmx1g"
+    volumes:
+      - ./rocketmq/namesrv/logs:/root/logs
+    command: sh mqnamesrv
+    networks:
+      - pro-network
+          
+  rmq-broker:
+    image: apache/rocketmq:4.9.4
+    container_name: rmq-broker
+    restart: always
+    depends_on:
+      - rmq-namesrv
+    ports:
+      - 10909:10909
+      - 10911:10911
+    volumes:
+      - ./rocketmq/broker/logs:/root/logs
+      - ./rocketmq/broker/store:/root/store
+      - ./rocketmq/broker/conf/broker.conf:/opt/rocketmq-4.4.0/conf/broker.conf
+    command: sh mqbroker  -c /opt/rocketmq-4.4.0/conf/broker.conf
+    environment:
+      NAMESRV_ADDR: "rmq-namesrv:9876"
+      JAVA_OPT_EXT: "-server -Xms1g -Xmx1g -Xmn1g"
+    networks:
+      - pro-network
+  
+  # rocketMQ控制台 
+  rmq-dashboard:
+    image: apacherocketmq/rocketmq-dashboard:1.0.0
+    container_name: rmq-dashboard
+    restart: always
+    ports:
+      - 8088:8080
+    depends_on:
+      - rmq-namesrv
+    volumes:
+      - ./rocketmq/console/logs:/root/logs
+    environment:
+      JAVA_OPTS: "-Drocketmq.namesrv.addr=rmq-namesrv:9876 -Dcom.rocketmq.sendMessageWithVIPChannel=false"
+    networks:
+      - pro-network
+
+  # ES =====================================================
+  # 可视化工具 常见的 cerebro elasticsearch-head、ElasticHD、Dejavu等
+  cerebro:
+    image: lmenezes/cerebro:0.9.2
+    restart: always
+    container_name: cerebro
+    ports:
+      - "9000:9000"
+    command:
+      - -Dhosts.0.host=http://es780:9200
+    networks:
+      - pro-network
+  kibana:
+    image: kibana:7.8.0
+    restart: always
+    container_name: kibana780
+    environment:
+      - XPACK_GRAPH_ENABLED=true
+      - TIMELION_ENABLED=true
+      - XPACK_MONITORING_COLLECTION_ENABLED="true"
+      - I18N_LOCALE=zh-CN
+      - ELASTICSEARCH_HOSTS=http://es780:9200
+      # 配置账号密码
+      # - ELASTICSEARCH_USERNAME=admin
+      # - ELASTICSEARCH_PASSWORD=admin
+    ports:
+      - "5601:5601"
+    networks:
+      - pro-network
+  # 伊拉丝忒克色七
+  elasticsearch:
+    image: elasticsearch:7.8.0
+    restart: always
+    container_name: es780
+    environment:
+      # 开启内存锁定
+      - bootstrap.memory_lock=true
+      - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
+      # 指定单节点启动
+      - discovery.type=single-node
+    ulimits:
+      # 取消内存相关限制  用于开启内存锁定
+      memlock:
+        soft: -1
+        hard: -1
+    volumes:
+      - ./elasticsearch/data:/usr/share/elasticsearch/data
+      - ./elasticsearch/logs:/usr/share/elasticsearch/logs
+      - ./elasticsearch/plugins/ik-7.8.0:/usr/share/elasticsearch/plugins/ik
+    ports:
+      - 9200:9200
+      - 9300:9300
+    networks:
+      - pro-network
